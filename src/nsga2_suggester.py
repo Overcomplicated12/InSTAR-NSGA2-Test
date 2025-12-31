@@ -1,3 +1,4 @@
+import os
 import csv, math, random
 from dataclasses import dataclass
 from typing import List, Dict, Tuple
@@ -50,6 +51,10 @@ OBJ_SCALES = {
     "veerScore":  20.0,     # typical veer range
     "lineLost":   50.0,     # typical lineLost range
 }
+
+# Setting up paths to the data file
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+TRIALS_PATH = os.path.join(BASE_DIR, "..", "data", "trials.csv")
 
 
 # -----------------------
@@ -238,7 +243,7 @@ def unique_params(cands: List[Dict[str,float]], seen: set) -> List[Dict[str,floa
 def main():
     random.seed()  # system randomness
 
-    trials = read_trials("trials.csv")
+    trials = read_trials(TRIALS_PATH)
     if len(trials) < 6:
         print("Add at least ~6 trials for NSGA-II to have something to work with.")
         return
