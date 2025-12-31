@@ -155,6 +155,38 @@ def fast_nondominated_sort(pop: List[Trial]) -> List[List[int]]:
     fronts.pop()  # last empty
     return fronts
 
+
+def choose_single_solution(pareto_indices: List[int], trials: List[Trial]) -> Trial:
+    """
+    Choose ONE solution from the Pareto front using explicit priorities.
+    Priority order:
+      1) finish == 1
+      2) lowest runtime_ms
+      3) lowest brake_pwr
+      4) lowest veerScore
+      5) lowest lineLost
+    """
+
+    pareto_trials = [trials[i] for i in pareto_indices]
+
+    # 1) keep only finishers if possible
+    finishers = [t for t in pareto_trials if int(t.metrics["finish"]) == 1]
+    if finishers:
+        pareto_trials = finishers
+
+    # 2) sort by explicit priority
+    pareto_trials.sort(
+        key=lambda t: (
+            t.metrics["runtime_ms"],
+            t.params["brake_pwr"],
+            t.metrics["veerScore"],
+            t.metrics["lineLost"],
+        )
+    )
+
+    return pareto_trials[0]
+
+
 def crowding_distance(front: List[int], pop: List[Trial]) -> Dict[int, float]:
     dist = {i: 0.0 for i in front}
     num_obj = len(pop[0].obj)
@@ -266,21 +298,8 @@ def main():
             seen.add(key)
             children.append(c)
 
-    # Print suggested next generation
-    print("SUGGESTED_NEXT_GEN")
-    print(",".join(PARAM_COLS))
-    for c in children:
-        print(",".join(str(c[p]) for p in PARAM_COLS))
+    
 
-    # Also show current Pareto front (best tradeoffs)
-    fronts = fast_nondominated_sort(trials)
-    pareto = fronts[0]
-    print("\nCURRENT_PARETO_FRONT (min runtime, veerScore, lineLost)")
-    print("runtime_ms,veerScore,lineLost,finish," + ",".join(PARAM_COLS))
-    for i in sorted(pareto, key=lambda idx: trials[idx].obj):
-        t = trials[i]
-        print(f"{t.metrics['runtime_ms']},{t.metrics['veerScore']},{t.metrics['lineLost']},{int(t.metrics[FINISH_COL])},"
-              + ",".join(str(t.params[p]) for p in PARAM_COLS))
 
 if __name__ == "__main__":
     main()
