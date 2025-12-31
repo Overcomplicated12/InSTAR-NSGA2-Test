@@ -35,6 +35,23 @@ BOUNDS = {
 # Which parameter columns exist in your CSV (must be in BOUNDS)
 PARAM_COLS = ["kp","kd","base_speed","min_base_speed","corner1","corner2","corner3","brake_pwr"]
 
+# Objective weights (bigger = more important)
+OBJ_WEIGHTS = {
+    "runtime_ms": 1.0,
+    "veerScore":  1.0,
+    "lineLost":   3.0,   # example: punish losing the line more
+}
+
+# If you want weights to mean "importance" but keep magnitudes comparable:
+# set NORMALIZE_OBJECTIVES = True and provide rough scales.
+NORMALIZE_OBJECTIVES = True
+OBJ_SCALES = {
+    "runtime_ms": 10000.0,  # typical runtime range
+    "veerScore":  20.0,     # typical veer range
+    "lineLost":   50.0,     # typical lineLost range
+}
+
+
 # -----------------------
 # NSGA-II core
 # -----------------------
@@ -78,7 +95,23 @@ def compute_objectives(t: Trial) -> Tuple[float, float, float]:
 
     veer = t.metrics["veerScore"]
     lost = t.metrics["lineLost"]
-    return (runtime, veer, lost)
+
+    if NORMALIZE_OBJECTIVES:
+        runtime_n = runtime / max(OBJ_SCALES["runtime_ms"], 1e-9)
+        veer_n    = veer    / max(OBJ_SCALES["veerScore"], 1e-9)
+        lost_n    = lost    / max(OBJ_SCALES["lineLost"], 1e-9)
+    else:
+        runtime_n, veer_n, lost_n = runtime, veer, lost
+
+    runtime_w = runtime_n * OBJ_WEIGHTS["runtime_ms"]
+    veer_w    = veer_n    * OBJ_WEIGHTS["veerScore"]
+    lost_w    = lost_n    * OBJ_WEIGHTS["lineLost"]
+
+    # Tiny tiebreaker favoring faster runs (safe for NSGA-II)
+    runtime_w -= 1e-6 * runtime_n
+
+    return (runtime_w, veer_w, lost_w)
+
 
 def dominates(a: Tuple[float,...], b: Tuple[float,...]) -> bool:
     # a dominates b if a is <= b in all objectives and < in at least one
