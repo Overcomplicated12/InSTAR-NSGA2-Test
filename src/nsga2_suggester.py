@@ -37,7 +37,7 @@ PARAM_COLS = ["kp","kd","base_speed","min_base_speed","corner1","corner2","corne
 
 # Objective weights (bigger = more important)
 OBJ_WEIGHTS = {
-    "runtime_ms": 1.0,
+    "runtime_ms": 5.0,
     "veerScore":  1.0,
     "lineLost":   3.0,   # example: punish losing the line more
 }
