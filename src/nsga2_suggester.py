@@ -30,7 +30,7 @@ BOUNDS = {
     "corner1": (400, 1400),
     "corner2": (800, 2200),
     "corner3": (1200, 2600),
-    "brake_pwr": (0, 200),
+    "brake_pwr": (0, 40),
 }
 
 # Which parameter columns exist in your CSV (must be in BOUNDS)
