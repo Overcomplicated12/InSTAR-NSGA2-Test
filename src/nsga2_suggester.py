@@ -298,7 +298,30 @@ def main():
             seen.add(key)
             children.append(c)
 
-    
+    # Print suggested next generation
+    print("SUGGESTED_NEXT_GEN")
+    print(",".join(PARAM_COLS))
+    for c in children:
+        print(",".join(str(c[p]) for p in PARAM_COLS))
+
+    # Also show current Pareto front (best tradeoffs)
+    fronts = fast_nondominated_sort(trials)
+    pareto = fronts[0]
+
+    best = choose_single_solution(pareto, trials)
+
+    print("\nCHOSEN_BEST_SOLUTION")
+    print(",".join(PARAM_COLS))
+    print(",".join(str(best.params[p]) for p in PARAM_COLS))
+
+    print("\nBEST_SOLUTION_METRICS")
+    print("runtime_ms,veerScore,lineLost,finish")
+    print(
+        f"{best.metrics['runtime_ms']},"
+        f"{best.metrics['veerScore']},"
+        f"{best.metrics['lineLost']},"
+        f"{int(best.metrics['finish'])}"
+    )
 
 
 if __name__ == "__main__":
