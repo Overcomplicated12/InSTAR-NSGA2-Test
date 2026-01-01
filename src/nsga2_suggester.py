@@ -1,27 +1,30 @@
 import os
-import csv, math, random
-from dataclasses import dataclass
-from typing import List, Dict, Tuple
+import csv
+import numpy as np
+
+from pymoo.core.problem import Problem
+from pymoo.core.population import Population
+from pymoo.operators.crossover.sbx import SBX
+from pymoo.operators.mutation.pm import PM
+from pymoo.operators.survival.rank_and_crowding import RankAndCrowding
+from pymoo.util.nds.non_dominated_sorting import NonDominatedSorting
+
 
 # -----------------------
 # CONFIG (edit these)
 # -----------------------
 
-# Which columns are "metrics" (objectives)
 METRIC_COLS = ["runtime_ms", "veerScore", "lineLost"]
 FINISH_COL = "finish"
-
-# If finish == 0, add a big penalty so NSGA-II avoids non-finishers
 FINISH_PENALTY_MS = 60_000
 
-# How many new parameter sets to propose each run
 NEXT_GEN_SIZE = 12
+MUTATION_PROB = 0.25
+MUTATION_ETA = 20
+CROSSOVER_PROB = 1.0
+CROSSOVER_ETA = 15
 
-# Mutation settings
-MUTATION_RATE = 0.25   # probability each gene mutates
-MUTATION_SCALE = 0.12  # ~12% of range
-
-# Parameter bounds (MUST match your Arduino safe ranges)
+# Parameter bounds (MUST match Arduino safe ranges)
 BOUNDS = {
     "kp": (0.05, 0.45),
     "kd": (0.2,  3.0),
@@ -33,295 +36,200 @@ BOUNDS = {
     "brake_pwr": (0, 40),
 }
 
-# Which parameter columns exist in your CSV (must be in BOUNDS)
 PARAM_COLS = ["kp","kd","base_speed","min_base_speed","corner1","corner2","corner3","brake_pwr"]
 
 # Objective weights (bigger = more important)
 OBJ_WEIGHTS = {
     "runtime_ms": 5.0,
     "veerScore":  1.0,
-    "lineLost":   3.0,   # example: punish losing the line more
+    "lineLost":   3.0,
 }
 
-# If you want weights to mean "importance" but keep magnitudes comparable:
-# set NORMALIZE_OBJECTIVES = True and provide rough scales.
+# Optional normalization so weights behave predictably
 NORMALIZE_OBJECTIVES = True
 OBJ_SCALES = {
-    "runtime_ms": 10000.0,  # typical runtime range
-    "veerScore":  20.0,     # typical veer range
-    "lineLost":   50.0,     # typical lineLost range
+    "runtime_ms": 10000.0,
+    "veerScore":  20.0,
+    "lineLost":   50.0,
 }
 
-# Setting up paths to the data file
+# Path to trials.csv
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-TRIALS_PATH = os.path.join(BASE_DIR, "..", "data", "trials.csv")
+TRIALS_PATH = os.path.join(BASE_DIR, "trials.csv")  # put trials.csv next to this script
 
 
 # -----------------------
-# NSGA-II core
+# Helpers
 # -----------------------
 
-@dataclass
-class Trial:
-    params: Dict[str, float]
-    metrics: Dict[str, float]
-    # computed objectives list (same order as METRIC_COLS)
-    obj: Tuple[float, float, float] = None
+INT_PARAMS = {"base_speed","min_base_speed","corner1","corner2","corner3","brake_pwr"}
 
 def clamp(x, lo, hi):
     return lo if x < lo else hi if x > hi else x
 
-def read_trials(path: str) -> List[Trial]:
-    out = []
+def read_trials_csv(path):
+    X = []
+    M = []
     with open(path, newline="") as f:
         r = csv.DictReader(f)
         for row in r:
-            params = {}
+            # params
+            x = []
             for p in PARAM_COLS:
                 if p not in row:
-                    raise ValueError(f"Missing param column '{p}' in CSV.")
-                params[p] = float(row[p])
-
-            metrics = {}
+                    raise ValueError(f"Missing param column '{p}' in CSV header.")
+                x.append(float(row[p]))
+            # metrics
+            met = {}
             for m in METRIC_COLS + [FINISH_COL]:
                 if m not in row:
-                    raise ValueError(f"Missing metric column '{m}' in CSV.")
-                metrics[m] = float(row[m])
+                    raise ValueError(f"Missing metric column '{m}' in CSV header.")
+                met[m] = float(row[m])
+            X.append(x)
+            M.append(met)
+    return np.array(X, dtype=float), M
 
-            t = Trial(params=params, metrics=metrics)
-            out.append(t)
-    return out
+def compute_F(metrics_list):
+    F = []
+    for met in metrics_list:
+        runtime = met["runtime_ms"]
+        if int(met[FINISH_COL]) == 0:
+            runtime += FINISH_PENALTY_MS
 
-def compute_objectives(t: Trial) -> Tuple[float, float, float]:
-    # Objectives are minimized
-    runtime = t.metrics["runtime_ms"]
-    if int(t.metrics[FINISH_COL]) == 0:
-        runtime += FINISH_PENALTY_MS
+        veer = met["veerScore"]
+        lost = met["lineLost"]
 
-    veer = t.metrics["veerScore"]
-    lost = t.metrics["lineLost"]
-
-    if NORMALIZE_OBJECTIVES:
-        runtime_n = runtime / max(OBJ_SCALES["runtime_ms"], 1e-9)
-        veer_n    = veer    / max(OBJ_SCALES["veerScore"], 1e-9)
-        lost_n    = lost    / max(OBJ_SCALES["lineLost"], 1e-9)
-    else:
-        runtime_n, veer_n, lost_n = runtime, veer, lost
-
-    runtime_w = runtime_n * OBJ_WEIGHTS["runtime_ms"]
-    veer_w    = veer_n    * OBJ_WEIGHTS["veerScore"]
-    lost_w    = lost_n    * OBJ_WEIGHTS["lineLost"]
-
-    # Tiny tiebreaker favoring faster runs (safe for NSGA-II)
-    runtime_w -= 1e-6 * runtime_n
-
-    return (runtime_w, veer_w, lost_w)
-
-
-def dominates(a: Tuple[float,...], b: Tuple[float,...]) -> bool:
-    # a dominates b if a is <= b in all objectives and < in at least one
-    le_all = all(x <= y for x, y in zip(a, b))
-    lt_any = any(x < y for x, y in zip(a, b))
-    return le_all and lt_any
-
-def fast_nondominated_sort(pop: List[Trial]) -> List[List[int]]:
-    # Returns list of fronts, each front is list of indices
-    S = [set() for _ in pop]
-    n = [0 for _ in pop]
-    fronts: List[List[int]] = [[]]
-
-    for i in range(len(pop)):
-        for j in range(len(pop)):
-            if i == j:
-                continue
-            if dominates(pop[i].obj, pop[j].obj):
-                S[i].add(j)
-            elif dominates(pop[j].obj, pop[i].obj):
-                n[i] += 1
-        if n[i] == 0:
-            fronts[0].append(i)
-
-    k = 0
-    while fronts[k]:
-        next_front = []
-        for i in fronts[k]:
-            for j in S[i]:
-                n[j] -= 1
-                if n[j] == 0:
-                    next_front.append(j)
-        k += 1
-        fronts.append(next_front)
-
-    fronts.pop()  # last empty
-    return fronts
-
-
-def choose_single_solution(pareto_indices: List[int], trials: List[Trial]) -> Trial:
-    """
-    Choose ONE solution from the Pareto front using explicit priorities.
-    Priority order:
-      1) finish == 1
-      2) lowest runtime_ms
-      3) lowest brake_pwr
-      4) lowest veerScore
-      5) lowest lineLost
-    """
-
-    pareto_trials = [trials[i] for i in pareto_indices]
-
-    # 1) keep only finishers if possible
-    finishers = [t for t in pareto_trials if int(t.metrics["finish"]) == 1]
-    if finishers:
-        pareto_trials = finishers
-
-    # 2) sort by explicit priority
-    pareto_trials.sort(
-        key=lambda t: (
-            t.metrics["runtime_ms"],
-            t.params["brake_pwr"],
-            t.metrics["veerScore"],
-            t.metrics["lineLost"],
-        )
-    )
-
-    return pareto_trials[0]
-
-
-def crowding_distance(front: List[int], pop: List[Trial]) -> Dict[int, float]:
-    dist = {i: 0.0 for i in front}
-    num_obj = len(pop[0].obj)
-
-    for m in range(num_obj):
-        front_sorted = sorted(front, key=lambda i: pop[i].obj[m])
-        dist[front_sorted[0]] = float("inf")
-        dist[front_sorted[-1]] = float("inf")
-
-        fmin = pop[front_sorted[0]].obj[m]
-        fmax = pop[front_sorted[-1]].obj[m]
-        if fmax == fmin:
-            continue
-
-        for k in range(1, len(front_sorted)-1):
-            prevv = pop[front_sorted[k-1]].obj[m]
-            nextv = pop[front_sorted[k+1]].obj[m]
-            dist[front_sorted[k]] += (nextv - prevv) / (fmax - fmin)
-
-    return dist
-
-def nsga2_select(pop: List[Trial], k: int) -> List[Trial]:
-    fronts = fast_nondominated_sort(pop)
-    selected = []
-    for front in fronts:
-        if len(selected) + len(front) <= k:
-            selected.extend([pop[i] for i in front])
+        if NORMALIZE_OBJECTIVES:
+            runtime_n = runtime / max(OBJ_SCALES["runtime_ms"], 1e-9)
+            veer_n    = veer    / max(OBJ_SCALES["veerScore"], 1e-9)
+            lost_n    = lost    / max(OBJ_SCALES["lineLost"], 1e-9)
         else:
-            cd = crowding_distance(front, pop)
-            front_sorted = sorted(front, key=lambda i: cd[i], reverse=True)
-            needed = k - len(selected)
-            selected.extend([pop[i] for i in front_sorted[:needed]])
-            break
-    return selected
+            runtime_n, veer_n, lost_n = runtime, veer, lost
 
-# -----------------------
-# Variation operators
-# -----------------------
+        runtime_w = runtime_n * OBJ_WEIGHTS["runtime_ms"]
+        veer_w    = veer_n    * OBJ_WEIGHTS["veerScore"]
+        lost_w    = lost_n    * OBJ_WEIGHTS["lineLost"]
 
-def crossover(p1: Dict[str,float], p2: Dict[str,float]) -> Dict[str,float]:
-    # Blend crossover for floats/ints
-    child = {}
-    for key in PARAM_COLS:
-        lo, hi = BOUNDS[key]
-        a = p1[key]
-        b = p2[key]
-        alpha = random.random()
-        v = alpha*a + (1-alpha)*b
-        child[key] = clamp(v, lo, hi)
-    # keep int-like params as ints
-    for key in ["base_speed","min_base_speed","corner1","corner2","corner3","brake_pwr"]:
-        child[key] = int(round(child[key]))
-    return child
+        # tiny tie-break toward faster
+        runtime_w -= 1e-6 * runtime_n
 
-def mutate(p: Dict[str,float]) -> Dict[str,float]:
-    out = dict(p)
-    for key in PARAM_COLS:
-        if random.random() < MUTATION_RATE:
-            lo, hi = BOUNDS[key]
-            span = hi - lo
-            delta = random.gauss(0, MUTATION_SCALE*span)
-            out[key] = clamp(out[key] + delta, lo, hi)
-    for key in ["base_speed","min_base_speed","corner1","corner2","corner3","brake_pwr"]:
-        out[key] = int(round(out[key]))
-    return out
+        F.append([runtime_w, veer_w, lost_w])
+    return np.array(F, dtype=float)
 
-def make_child(parents: List[Trial]) -> Dict[str,float]:
-    p1, p2 = random.sample(parents, 2)
-    c = crossover(p1.params, p2.params)
-    c = mutate(c)
-    return c
+def round_and_clip(X):
+    X2 = X.copy()
+    for j, name in enumerate(PARAM_COLS):
+        lo, hi = BOUNDS[name]
+        X2[:, j] = np.clip(X2[:, j], lo, hi)
+        if name in INT_PARAMS:
+            X2[:, j] = np.rint(X2[:, j])
+    return X2
 
-def unique_params(cands: List[Dict[str,float]], seen: set) -> List[Dict[str,float]]:
+def key_tuple(xrow):
+    # stable tuple for de-dup (ints stay ints)
     out = []
-    for c in cands:
-        key = tuple(c[p] for p in PARAM_COLS)
-        if key not in seen:
-            seen.add(key)
-            out.append(c)
-    return out
+    for v, name in zip(xrow, PARAM_COLS):
+        if name in INT_PARAMS:
+            out.append(int(v))
+        else:
+            out.append(round(float(v), 12))
+    return tuple(out)
+
 
 # -----------------------
-# Main: suggest next gen
+# Minimal Problem (only bounds needed for operators)
+# -----------------------
+
+class ParamProblem(Problem):
+    def __init__(self):
+        xl = np.array([BOUNDS[p][0] for p in PARAM_COLS], dtype=float)
+        xu = np.array([BOUNDS[p][1] for p in PARAM_COLS], dtype=float)
+        super().__init__(n_var=len(PARAM_COLS), n_obj=3, n_constr=0, xl=xl, xu=xu)
+
+    def _evaluate(self, X, out, *args, **kwargs):
+        raise RuntimeError("We do not evaluate with pymoo here; objectives come from your trials.csv.")
+
+
+# -----------------------
+# Main
 # -----------------------
 
 def main():
-    random.seed()  # system randomness
+    np.random.seed(None)
 
-    trials = read_trials(TRIALS_PATH)
-    if len(trials) < 6:
-        print("Add at least ~6 trials for NSGA-II to have something to work with.")
+    X, metrics_list = read_trials_csv(TRIALS_PATH)
+    if len(X) < 6:
+        print("Add at least ~6 trials for NSGA-II style selection to work well.")
         return
 
-    # attach objectives
-    for t in trials:
-        t.obj = compute_objectives(t)
+    F = compute_F(metrics_list)
 
-    # Select a parent pool (top half)
-    parent_pool_size = max(4, len(trials)//2)
-    parents = nsga2_select(trials, parent_pool_size)
+    problem = ParamProblem()
 
-    # Build new candidates
-    seen = set(tuple(t.params[p] for p in PARAM_COLS) for t in trials)
+    # Create a population from your past trials
+    pop = Population.new("X", X, "F", F)
+
+    # Pick parent pool (top ~half) using Rank+Crowding (NSGA-II survival)
+    parent_pool_size = max(4, len(pop) // 2)
+    survival = RankAndCrowding()
+    parents_pop = survival.do(problem, pop, n_survive=parent_pool_size)
+
+    # Operators
+    cx = SBX(prob=CROSSOVER_PROB, eta=CROSSOVER_ETA)
+    mut = PM(prob=MUTATION_PROB, eta=MUTATION_ETA)
+
+    # Generate offspring
+    seen = set(key_tuple(row) for row in X)
     children = []
-    while len(children) < NEXT_GEN_SIZE:
-        c = make_child(parents)
-        key = tuple(c[p] for p in PARAM_COLS)
-        if key not in seen:
-            seen.add(key)
-            children.append(c)
 
-    # Print suggested next generation
+    # We'll keep trying until we have enough unique kids
+    while len(children) < NEXT_GEN_SIZE:
+        n_matings = max(1, NEXT_GEN_SIZE - len(children))
+
+        # parent index pairs into parents_pop
+        P = np.column_stack([
+            np.random.randint(0, len(parents_pop), size=n_matings),
+            np.random.randint(0, len(parents_pop), size=n_matings),
+        ])
+
+        off = cx.do(problem, parents_pop, P)     # crossover
+        off = mut.do(problem, off)              # mutation
+
+        Xoff = off.get("X")
+        Xoff = round_and_clip(Xoff)
+
+        for row in Xoff:
+            k = key_tuple(row)
+            if k not in seen:
+                seen.add(k)
+                children.append(row)
+            if len(children) >= NEXT_GEN_SIZE:
+                break
+
+    children = np.array(children, dtype=float)
+
+    # Print suggested next gen (paste into Arduino)
     print("SUGGESTED_NEXT_GEN")
     print(",".join(PARAM_COLS))
-    for c in children:
-        print(",".join(str(c[p]) for p in PARAM_COLS))
+    for row in children:
+        out = []
+        for v, name in zip(row, PARAM_COLS):
+            if name in INT_PARAMS:
+                out.append(str(int(v)))
+            else:
+                out.append(f"{float(v):.12g}")
+        print(",".join(out))
 
-    # Also show current Pareto front (best tradeoffs)
-    fronts = fast_nondominated_sort(trials)
-    pareto = fronts[0]
-
-    best = choose_single_solution(pareto, trials)
-
-    print("\nCHOSEN_BEST_SOLUTION")
-    print(",".join(PARAM_COLS))
-    print(",".join(str(best.params[p]) for p in PARAM_COLS))
-
-    print("\nBEST_SOLUTION_METRICS")
-    print("runtime_ms,veerScore,lineLost,finish")
-    print(
-        f"{best.metrics['runtime_ms']},"
-        f"{best.metrics['veerScore']},"
-        f"{best.metrics['lineLost']},"
-        f"{int(best.metrics['finish'])}"
-    )
+    # Print Pareto front from existing trials (based on weighted objectives F)
+    nds = NonDominatedSorting().do(F, only_non_dominated_front=True)
+    print("\nCURRENT_PARETO_FRONT (based on weighted objectives)")
+    print("runtime_ms,veerScore,lineLost,finish," + ",".join(PARAM_COLS))
+    for idx in nds:
+        met = metrics_list[idx]
+        row = X[idx]
+        print(f"{met['runtime_ms']},{met['veerScore']},{met['lineLost']},{int(met[FINISH_COL])}," +
+              ",".join(str(int(v)) if name in INT_PARAMS else f"{float(v):.12g}"
+                       for v, name in zip(row, PARAM_COLS)))
 
 
 if __name__ == "__main__":
