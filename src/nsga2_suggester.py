@@ -25,8 +25,8 @@ MUTATION_SCALE = 0.12  # ~12% of range
 BOUNDS = {
     "kp": (0.05, 0.45),
     "kd": (0.2,  3.0),
-    "base_speed": (120, 350),
-    "min_base_speed": (0, 200),
+    "base_speed": (120, 400),
+    "min_base_speed": (0, 400),
     "corner1": (400, 1400),
     "corner2": (800, 2200),
     "corner3": (1200, 2600),
