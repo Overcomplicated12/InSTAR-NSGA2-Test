@@ -15,7 +15,7 @@ FINISH_COL = "finish"
 FINISH_PENALTY_MS = 60_000
 
 # How many new parameter sets to propose each run
-NEXT_GEN_SIZE = 12
+NEXT_GEN_SIZE = 6
 
 # Mutation settings
 MUTATION_RATE = 0.25   # probability each gene mutates
