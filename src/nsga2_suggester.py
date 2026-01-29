@@ -18,6 +18,21 @@ FINISH_PENALTY_MS = 60_000
 NEXT_GEN_SIZE = 6
 
 # Mutation settings
+MUT_RATE = {
+  "kp": 0.20, "kd": 0.20,
+  "base_speed": 0.60,
+  "min_base_speed": 0.45,
+  "corner1": 0.45, "corner2": 0.45, "corner3": 0.45,
+  "brake_pwr": 0.35,
+}
+
+MUT_SCALE = {
+  "kp": 0.10, "kd": 0.10,
+  "base_speed": 0.25,        # bigger jumps
+  "min_base_speed": 0.25,
+  "corner1": 0.18, "corner2": 0.18, "corner3": 0.18,
+  "brake_pwr": 0.35,
+}
 MUTATION_RATE = 0.25   # probability each gene mutates
 MUTATION_SCALE = 0.12  # ~12% of range
 
@@ -212,11 +227,13 @@ def crossover(p1: Dict[str,float], p2: Dict[str,float]) -> Dict[str,float]:
 def mutate(p: Dict[str,float]) -> Dict[str,float]:
     out = dict(p)
     for key in PARAM_COLS:
-        if random.random() < MUTATION_RATE:
+        if random.random() < MUT_RATE.get(key, MUTATION_RATE):
             lo, hi = BOUNDS[key]
             span = hi - lo
-            delta = random.gauss(0, MUTATION_SCALE*span)
+            scale = MUT_SCALE.get(key, MUTATION_SCALE)
+            delta = random.gauss(0, scale * span)
             out[key] = clamp(out[key] + delta, lo, hi)
+
     for key in ["base_speed","min_base_speed","corner1","corner2","corner3","brake_pwr"]:
         out[key] = int(round(out[key]))
     return out
