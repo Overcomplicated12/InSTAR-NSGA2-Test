@@ -11,4 +11,4 @@ Before running any scripts, make sure you have Python installed. No other librar
 Thanks ❤️ - zeyu
 
 
-data analysis instructions are in the folder so js follow those 😏 - lawrence
+data analysis instructions are in the folder so js follow those - lawrence
